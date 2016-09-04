@@ -171,6 +171,72 @@ call_user_func(function () {
             Command\RegisterNewBuilding::class => function (ContainerInterface $container) : RegisterNewBuildingHandler {
                 return new RegisterNewBuildingHandler($container->get(BuildingRepositoryInterface::class));
             },
+            Command\CheckPersonIntoBuilding::class => function (ContainerInterface $container) : callable {
+                return function (Command\CheckPersonIntoBuilding $command) use ($container) {
+                    /* @var $repo BuildingRepositoryInterface */
+                    $repo = $container->get(BuildingRepositoryInterface::class);
+
+                    $building = $repo->get($command->buildingId());
+
+                    $building->checkInUser($command->personName());
+                };
+            },
+            Command\CheckPersonOutOfBuilding::class => function (ContainerInterface $container) : callable {
+                return function (Command\CheckPersonOutOfBuilding $command) use ($container) {
+                    /* @var $repo BuildingRepositoryInterface */
+                    $repo = $container->get(BuildingRepositoryInterface::class);
+
+                    $building = $repo->get($command->buildingId());
+
+                    $building->checkOutUser($command->personName());
+                };
+            },
+            DomainEvent\PersonWasCheckedIntoBuilding::class . '-listeners' => function (ContainerInterface $container) : array {
+                $commandBus = $container->get(CommandBus::class);
+
+                return [
+                    function (DomainEvent\PersonWasCheckedIntoBuilding $event) use ($commandBus) {
+                        $commandBus->dispatch(Command\CheckPersonOutOfBuilding::fromNameAndBuilding(
+                            $event->personName(),
+                            Uuid::fromString($event->aggregateId())
+                        ));
+                    },
+                ];
+            },
+            DomainEvent\PersonWasCheckedIntoBuilding::class . '-projectors' => function (ContainerInterface $container) : array {
+                return [
+                    function (DomainEvent\PersonWasCheckedIntoBuilding $event) {
+                        $path = __DIR__ . '/' . $event->aggregateId();
+
+                        if (! file_exists($path)) {
+                            file_put_contents($path, '[]');
+                        }
+
+                        $persons = json_decode(file_get_contents($path), true);
+
+                        $persons[] = $event->personName();
+
+                        file_put_contents($path, json_encode(array_unique($persons)));
+                    },
+                ];
+            },
+            DomainEvent\PersonWasCheckedOutOfBuilding::class . '-projectors' => function (ContainerInterface $container) : array {
+                return [
+                    function (DomainEvent\PersonWasCheckedOutOfBuilding $event) {
+                        $path = __DIR__ . '/' . $event->aggregateId();
+
+                        if (! file_exists($path)) {
+                            file_put_contents($path, '[]');
+                        }
+
+                        $persons = json_decode(file_get_contents($path), true);
+
+                        unset($persons[array_search($event->personName(), $persons)]);
+
+                        file_put_contents($path, json_encode(array_values(array_unique($persons))));
+                    },
+                ];
+            },
             BuildingRepositoryInterface::class => function (ContainerInterface $container) : BuildingRepositoryInterface {
                 return new BuildingRepository(
                     new AggregateRepository(
@@ -211,11 +277,35 @@ call_user_func(function () {
     });
 
     $app->post('/checkin/{buildingId}', function (Request $request, Response $response) use ($sm) {
+        $commandBus = $sm->get(CommandBus::class);
 
+        try {
+            $commandBus->dispatch(Command\CheckPersonIntoBuilding::fromNameAndBuilding(
+                $request->getParsedBody()['username'],
+                Uuid::fromString($request->getAttribute('buildingId'))
+            ));
+        } catch (\Throwable $e) {
+            var_dump(get_class($e), $e->getMessage());
+            die();
+        }
+
+        return $response->withAddedHeader('Location', '/building/' . $request->getAttribute('buildingId'));
     });
 
     $app->post('/checkout/{buildingId}', function (Request $request, Response $response) use ($sm) {
+        $commandBus = $sm->get(CommandBus::class);
 
+        try {
+            $commandBus->dispatch(Command\CheckPersonOutOfBuilding::fromNameAndBuilding(
+                $request->getParsedBody()['username'],
+                Uuid::fromString($request->getAttribute('buildingId'))
+            ));
+        } catch (\Throwable $e) {
+            var_dump(get_class($e), $e->getMessage());
+            die();
+        }
+
+        return $response->withAddedHeader('Location', '/building/' . $request->getAttribute('buildingId'));
     });
 
     $app->run();
